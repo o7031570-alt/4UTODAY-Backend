@@ -98,21 +98,35 @@ def process_post(message, bot):  # CHANGED: Removed 'async'
     except Exception as e:
         print(f"❌ Post processing error: {e}")
 
-# ========== Startup Config ==========
+# ========== Startup Config (FIXED VERSION - ဒီအတိုင်း အစားထိုးပါ) ==========
 def setup_webhook():
     init_database()
     if not TOKEN or not WEBHOOK_URL:
         print("⚠️ Token/URL missing. Skipping Webhook Setup.")
         return
-    try:
-        bot = Bot(TOKEN)
-        bot.set_webhook(url=WEBHOOK_URL)  # CHANGED: Direct sync call
-        print(f"🌐 Webhook set: {WEBHOOK_URL}")
-    except Exception as e:
-        print(f"❌ Webhook setup failed: {e}")
-
-setup_webhook()
-
+    
+    import threading
+    # Webhook ကို background thread ထဲမှာ အလုပ်လုပ်စေခြင်း
+    def set_webhook_in_thread():
+        try:
+            bot = Bot(TOKEN)
+            # Important: Delete old webhook first to avoid conflicts
+            bot.delete_webhook(drop_pending_updates=True)
+            # Then set the new one
+            success = bot.set_webhook(url=WEBHOOK_URL)
+            if success:
+                print(f"✅ Webhook successfully set to: {WEBHOOK_URL}")
+            else:
+                print(f"❌ Failed to set webhook")
+        except Exception as e:
+            print(f"❌ Webhook setup failed: {e}")
+    
+    # Start the webhook setup in a separate thread
+    thread = threading.Thread(target=set_webhook_in_thread)
+    thread.daemon = True
+    thread.start()
+    print("🔄 Webhook setup started in background...")
+    
 # ========== API Endpoints (Same as before) ==========
 @app.route('/')
 def home():
