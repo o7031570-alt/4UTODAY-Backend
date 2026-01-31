@@ -85,7 +85,7 @@ class TelegramBot:
         """/stats command handler - Admin only"""
         user_id = update.effective_user.id
         
-        # Admin check (ဒီနေရာမှာ ကိုယ့် admin ID ကို ထည့်ပါ)
+        # Admin check
         if str(user_id) not in config.ADMIN_IDS:
             await update.message.reply_text("⛔ ဤ command ကို သုံးခွင့်မရှိပါ။")
             return
@@ -114,7 +114,6 @@ class TelegramBot:
     
     async def _handle_message(self, update: Update, context):
         """Regular message handler"""
-        # ဒီမှာ message process လုပ်မယ်
         message = update.message.text
         user = update.effective_user
         
@@ -133,7 +132,7 @@ class TelegramBot:
         except Exception as e:
             logger.error(f"User save error: {e}")
         
-        # Echo message (ဥပမာအားဖြင့်)
+        # Echo message
         await update.message.reply_text(f"📩 Message received: {message[:50]}...")
     
     async def setup_webhook(self):
@@ -165,16 +164,27 @@ class TelegramBot:
 # Global bot instance
 telegram_bot = TelegramBot()
 
-# Sync functions for Flask (async ကို sync လုပ်ဖို့)
+# Sync functions for Flask
 def setup_webhook_sync():
     """Flask ထဲကနေ async function ကို ခေါ်သုံးဖို့"""
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
     try:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
         return loop.run_until_complete(telegram_bot.setup_webhook())
+    except Exception as e:
+        logger.error(f"Webhook setup error: {e}")
+        return False
     finally:
         loop.close()
 
-async def setup_bot_async():
-    """Bot setup async function"""
-    return await telegram_bot.setup()
+def process_update_sync(update_data):
+    """Async process_update function ကို sync လုပ်ဖို့"""
+    try:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        return loop.run_until_complete(telegram_bot.process_update(update_data))
+    except Exception as e:
+        logger.error(f"Process update error: {e}")
+        return False
+    finally:
+        loop.close()
