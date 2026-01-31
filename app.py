@@ -3,11 +3,12 @@ from flask import Flask, request, jsonify
 from flask_cors import CORS
 import logging
 from datetime import datetime
+import threading
 
 # Import our modules
 from config import config
 from database import db
-from telegram_bot import telegram_bot, setup_webhook_sync
+from telegram_bot import telegram_bot, setup_webhook_sync, process_update_sync
 
 # Setup logging
 logging.basicConfig(
@@ -19,6 +20,54 @@ logger = logging.getLogger(__name__)
 # Initialize Flask app
 app = Flask(__name__)
 CORS(app)
+
+# Global flag to track initialization
+_initialized = False
+_init_lock = threading.Lock()
+
+def initialize_app():
+    """Application initialization"""
+    global _initialized
+    
+    with _init_lock:
+        if _initialized:
+            return
+        
+        logger.info("🚀 Starting 4UTODAY Bot...")
+        
+        # Configuration check
+        logger.info("🔧 Configuration Check:")
+        logger.info(f"   - TOKEN: {'✅ Set' if config.TOKEN else '❌ Missing'}")
+        logger.info(f"   - DATABASE_URL: {'✅ Set' if config.DATABASE_URL else '❌ Missing'}")
+        logger.info(f"   - RENDER_URL: {config.RENDER_URL}")
+        logger.info(f"   - WEBHOOK_URL: {config.WEBHOOK_URL}")
+        
+        # Database check
+        if db.conn:
+            logger.info("✅ Database connected")
+        else:
+            logger.error("❌ Database connection failed")
+        
+        # Setup webhook in background thread
+        def setup_webhook_background():
+            logger.info("🔄 Setting up webhook...")
+            if setup_webhook_sync():
+                logger.info("✅ Webhook setup completed")
+            else:
+                logger.error("❌ Webhook setup failed")
+        
+        # Start webhook setup in background
+        webhook_thread = threading.Thread(target=setup_webhook_background, daemon=True)
+        webhook_thread.start()
+        
+        logger.info("✅ Application initialized")
+        _initialized = True
+
+@app.before_request
+def before_request_handler():
+    """Ensure app is initialized before first request"""
+    if not _initialized:
+        initialize_app()
 
 @app.route('/')
 def home():
@@ -59,14 +108,14 @@ def health_check():
         }), 500
 
 @app.route(config.WEBHOOK_PATH, methods=['POST'])
-async def telegram_webhook():
+def telegram_webhook():
     """Telegram webhook endpoint"""
     try:
         update_data = request.get_json()
-        logger.info(f"📩 Webhook received: {update_data}")
+        logger.info(f"📩 Webhook received")
         
-        # Process the update
-        await telegram_bot.process_update(update_data)
+        # Process the update synchronously
+        process_update_sync(update_data)
         
         # Log to database
         db.add_log("INFO", "Webhook processed", "telegram_webhook")
@@ -142,51 +191,14 @@ def get_stats():
         logger.error(f"Stats error: {e}")
         return jsonify({"status": "error", "message": str(e)}), 500
 
-@app.before_first_request
-def startup():
-    """Application startup sequence"""
-    logger.info("🚀 Starting 4UTODAY Bot...")
-    
-    # Configuration check
-    logger.info("🔧 Configuration Check:")
-    logger.info(f"   - TOKEN: {'✅ Set' if config.TOKEN else '❌ Missing'}")
-    logger.info(f"   - DATABASE_URL: {'✅ Set' if config.DATABASE_URL else '❌ Missing'}")
-    logger.info(f"   - RENDER_URL: {config.RENDER_URL}")
-    logger.info(f"   - WEBHOOK_URL: {config.WEBHOOK_URL}")
-    
-    # Database check
-    if db.conn:
-        logger.info("✅ Database connected")
-    else:
-        logger.error("❌ Database connection failed")
-    
-    # Setup webhook
-    logger.info("🔄 Setting up webhook...")
-    if setup_webhook_sync():
-        logger.info("✅ Webhook setup completed")
-    else:
-        logger.error("❌ Webhook setup failed")
-    
-    logger.info("✅ Startup completed")
-
-@app.teardown_appcontext
-def shutdown(exception=None):
-    """Application shutdown cleanup"""
-    if exception:
-        logger.error(f"App shutdown with error: {exception}")
-    
-    # Close database connection
-    db.close()
-    logger.info("Application shutdown complete")
+# Initialize on import (for gunicorn)
+initialize_app()
 
 if __name__ == '__main__':
-    # Run startup sequence
-    startup()
-    
     # Start Flask app
     app.run(
         host='0.0.0.0',
         port=config.PORT,
         debug=config.DEBUG,
         use_reloader=False
-        )
+    )
