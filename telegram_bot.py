@@ -3,6 +3,9 @@ import asyncio
 import logging
 from telegram import Bot, Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters
+from telegram.constants import ParseMode
+import threading
+
 from config import config
 from database import db
 
@@ -13,12 +16,16 @@ class TelegramBot:
         self.token = config.TOKEN
         self.bot = None
         self.application = None
+        self.is_setup = False
     
-    async def setup(self):
-        """Bot ကို setup လုပ်မယ်"""
+    async def setup_async(self):
+        """Bot ကို async နည်းနဲ့ setup လုပ်မယ်"""
         if not self.token:
             logger.error("❌ Bot token not found!")
             return False
+        
+        if self.is_setup:
+            return True
         
         try:
             # Application create လုပ်မယ်
@@ -27,7 +34,11 @@ class TelegramBot:
             # Handlers တွေ ထည့်မယ်
             self._add_handlers()
             
+            # Initialize application
+            await self.application.initialize()
+            
             logger.info("✅ Telegram bot setup completed")
+            self.is_setup = True
             return True
         except Exception as e:
             logger.error(f"❌ Bot setup error: {e}")
@@ -62,7 +73,7 @@ class TelegramBot:
 /help - အကူအညီရယူရန်
 /stats - စာရင်းဇယားများ (Admin only)
         """
-        await update.message.reply_text(welcome_text)
+        await update.message.reply_text(welcome_text, parse_mode=ParseMode.MARKDOWN)
     
     async def _help_command(self, update: Update, context):
         """/help command handler"""
@@ -77,9 +88,9 @@ class TelegramBot:
 • Database ထဲတွင် သိမ်းဆည်းခြင်း
 • Webhook မှတဆင့် အလုပ်လုပ်ခြင်း
 
-📞 Support: @your_support_contact
+📞 Support: Contact administrator
         """
-        await update.message.reply_text(help_text)
+        await update.message.reply_text(help_text, parse_mode=ParseMode.MARKDOWN)
     
     async def _stats_command(self, update: Update, context):
         """/stats command handler - Admin only"""
@@ -92,22 +103,20 @@ class TelegramBot:
         
         # Database ကနေ statistics ယူမယ်
         try:
-            with db.conn.cursor() as cur:
-                cur.execute("SELECT COUNT(*) as total_posts FROM posts")
-                post_count = cur.fetchone()[0]
-                
-                cur.execute("SELECT COUNT(*) as total_users FROM users")
-                user_count = cur.fetchone()[0]
+            stats = db.get_stats()
             
             stats_text = f"""
 📊 **Bot Statistics**
 
-📝 Total Posts: {post_count}
-👥 Total Users: {user_count}
+📝 Total Posts: {stats['total_posts']}
+🖼️ Photo Posts: {stats['type_counts'].get('photo', 0)}
+📝 Text Posts: {stats['type_counts'].get('text', 0)}
+🕒 Latest Post: {stats['latest_post'].strftime('%Y-%m-%d %H:%M') if stats['latest_post'] else 'N/A'}
+
 🔗 Webhook: {config.WEBHOOK_URL}
 🌐 Server: {config.RENDER_URL}
             """
-            await update.message.reply_text(stats_text)
+            await update.message.reply_text(stats_text, parse_mode=ParseMode.MARKDOWN)
         except Exception as e:
             logger.error(f"Stats error: {e}")
             await update.message.reply_text(f"❌ Statistics ရယူရာတွင် error: {e}")
@@ -135,8 +144,12 @@ class TelegramBot:
         # Echo message
         await update.message.reply_text(f"📩 Message received: {message[:50]}...")
     
-    async def setup_webhook(self):
-        """Webhook setup လုပ်မယ်"""
+    async def setup_webhook_async(self):
+        """Webhook setup လုပ်မယ် (async)"""
+        if not self.token:
+            logger.error("❌ Bot token not found! Cannot setup webhook.")
+            return False
+        
         try:
             bot = Bot(token=self.token)
             
@@ -153,38 +166,41 @@ class TelegramBot:
             logger.error(f"❌ Webhook setup error: {e}")
             return False
     
-    async def process_update(self, update_data):
-        """Webhook ကနေ ရလာတဲ့ update ကို process လုပ်မယ်"""
-        if not self.application:
-            await self.setup()
+    async def process_update_async(self, update_data):
+        """Webhook ကနေ ရလာတဲ့ update ကို process လုပ်မယ် (async)"""
+        if not self.is_setup:
+            await self.setup_async()
         
-        update = Update.de_json(update_data, self.application.bot)
-        await self.application.process_update(update)
+        try:
+            update = Update.de_json(update_data, self.application.bot)
+            await self.application.process_update(update)
+        except Exception as e:
+            logger.error(f"❌ Process update error: {e}")
 
 # Global bot instance
 telegram_bot = TelegramBot()
 
-# Sync functions for Flask
+# Sync wrapper functions for Flask
 def setup_webhook_sync():
-    """Flask ထဲကနေ async function ကို ခေါ်သုံးဖို့"""
+    """Sync wrapper for webhook setup"""
     try:
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
-        return loop.run_until_complete(telegram_bot.setup_webhook())
+        return loop.run_until_complete(telegram_bot.setup_webhook_async())
     except Exception as e:
-        logger.error(f"Webhook setup error: {e}")
+        logger.error(f"❌ Webhook setup error (sync): {e}")
         return False
     finally:
         loop.close()
 
 def process_update_sync(update_data):
-    """Async process_update function ကို sync လုပ်ဖို့"""
+    """Sync wrapper for processing updates"""
     try:
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
-        return loop.run_until_complete(telegram_bot.process_update(update_data))
+        return loop.run_until_complete(telegram_bot.process_update_async(update_data))
     except Exception as e:
-        logger.error(f"Process update error: {e}")
+        logger.error(f"❌ Process update error (sync): {e}")
         return False
     finally:
         loop.close()
