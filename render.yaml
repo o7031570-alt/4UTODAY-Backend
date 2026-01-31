@@ -1,13 +1,31 @@
-# render.yaml
 services:
   - type: web
     name: 4utoday-bot
     env: python
+    region: singapore  # or oregon, frankfurt, etc.
+    plan: free
     pythonVersion: "3.12.0"
     buildCommand: pip install -r requirements.txt
     startCommand: gunicorn app:app
     envVars:
       - key: DATABASE_URL
-        sync: false
+        fromDatabase:
+          name: 4utoday-db
+          property: connectionString
       - key: TOKEN
         sync: false
+      - key: RENDER_EXTERNAL_URL
+        sync: false
+      - key: LOG_LEVEL
+        value: INFO
+      - key: DEBUG
+        value: false
+      - key: CORS_ORIGINS
+        value: "*"
+
+databases:
+  - name: 4utoday-db
+    plan: free
+    region: singapore
+    databaseName: 4utoday
+    user: 4utoday_user
