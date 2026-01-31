@@ -1,7 +1,6 @@
-# requirements.txt
 Flask==3.1.2
 Flask-CORS==4.0.0
 python-telegram-bot==22.6
-psycopg[binary]==3.3.2  # psycopg3 ကို ပြောင်းသုံးပါ
+psycopg[binary]==3.3.2
 python-dotenv==1.0.0
 gunicorn==24.1.1
