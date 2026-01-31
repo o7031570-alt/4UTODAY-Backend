@@ -174,11 +174,12 @@ class BotManager:
             print(f"❌ Failed to start bot: {e}")
             self.is_running = False
     
-    def run_bot(self):
+def run_bot(self):
         try:
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
-            self.application.run_polling(close_loop=False)
+            # close_loop=False နဲ့ stop_signals=False ထည့်ပေးရပါမယ်
+            self.application.run_polling(close_loop=False, stop_signals=False)
         except Exception as e:
             print(f"❌ Bot polling error: {e}")
             self.is_running = False
