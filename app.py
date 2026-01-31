@@ -1,92 +1,89 @@
-# app.py - Complete Telegram Bot for Render
-from flask import Flask, request
+# app.py - 4UTODAY Telegram Bot with PostgreSQL
+from flask import Flask, request, jsonify
+from flask_cors import CORS
 import os
 import json
-import gspread
+import psycopg2
+from psycopg2.extras import RealDictCursor
 from telegram import Update
 from telegram.ext import Application, MessageHandler, filters, ContextTypes
-from google.oauth2.service_account import Credentials
 import threading
 import asyncio
-import logging
+from datetime import datetime
 
-# Flask App စတင်ပါ
+# ========== Flask App Setup ==========
 app = Flask(__name__)
+CORS(app)  # Allow frontend requests
 
-# ====== 1. GOOGLE SHEETS SETUP ======
-def get_google_sheet():
-    """Google Sheets နဲ့ ချိတ်ဆက်ပြီး worksheet object ပြန်ပေးမယ်"""
+# ========== Database Functions ==========
+def get_db_connection():
+    """Connect to PostgreSQL database on Render"""
     try:
-        # Render Environment Variable ကနေ JSON string ကိုဖတ်မယ်
-        creds_json_str = os.environ.get('GOOGLE_CREDENTIALS_JSON')
-        if not creds_json_str:
-            raise ValueError("GOOGLE_CREDENTIALS_JSON environment variable မတွေ့ပါ")
-        
-        # JSON string ကို dictionary အဖြစ် ပြောင်းမယ်
-        service_account_info = json.loads(creds_json_str)
-        
-        # Credentials object ဖန်တီးပြီး gspread ကို authorize လုပ်မယ်
-        credentials = Credentials.from_service_account_info(service_account_info)
-        gc = gspread.authorize(credentials)
-        
-        # Google Sheet ID ကိုယူမယ်
-        sheet_id = os.environ.get('GOOGLE_SHEET_ID')
-        if not sheet_id:
-            raise ValueError("GOOGLE_SHEET_ID environment variable မတွေ့ပါ")
-            
-        # Sheet ကိုဖွင့်ပြီး ပထမဆုံး worksheet ကိုရမယ်
-        sh = gc.open_by_key(sheet_id)
-        worksheet = sh.sheet1
-        
-        # Column headers ရှိမရှိ စစ်မယ်၊ မရှိရင် ထည့်မယ်
-        if worksheet.row_count == 0:
-            headers = ["Timestamp", "Title", "Description", "File URL", "Tags"]
-            worksheet.append_row(headers)
-            
-        print("✅ Google Sheets နှင့် ချိတ်ဆက်ပြီးပါပြီ")
-        return worksheet
-        
-    except json.JSONDecodeError as e:
-        print(f"❌ GOOGLE_CREDENTIALS_JSON ကို ဖတ်ရာတွင် အမှာ့အယွင်း: {e}")
-        return None
+        conn = psycopg2.connect(
+            os.environ['DATABASE_URL'],
+            cursor_factory=RealDictCursor
+        )
+        return conn
     except Exception as e:
-        print(f"❌ Google Sheets ချိတ်ဆက်ရာတွင် အမှာ့အယွင်း: {e}")
+        print(f"❌ Database connection failed: {e}")
         return None
 
-# ====== 2. TELEGRAM BOT HANDLER ======
+def init_database():
+    """Initialize database table if not exists"""
+    conn = get_db_connection()
+    if not conn:
+        return False
+    
+    try:
+        cur = conn.cursor()
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS posts (
+                id SERIAL PRIMARY KEY,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                telegram_message_id BIGINT,
+                post_title TEXT NOT NULL,
+                post_description TEXT,
+                file_url TEXT,
+                tags TEXT,
+                channel_username VARCHAR(255)
+            )
+        """)
+        conn.commit()
+        cur.close()
+        conn.close()
+        print("✅ Database table ready")
+        return True
+    except Exception as e:
+        print(f"❌ Database init error: {e}")
+        return False
+
+# ========== Telegram Bot Handler ==========
 async def handle_channel_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Telegram channel ကနေ post အသစ်တစ်ခု ရောက်လာရင် ဒီ function ကို ခေါ်မယ်"""
+    """Process new posts from Telegram channel"""
     try:
         message = update.channel_post
-        
-        # Post မရှိရင် ထွက်မယ်
         if not message:
             return
-            
-        print(f"📨 Channel post received: {message.message_id}")
         
-        # 1. Google Sheet ကို ချိတ်ဆက်မယ်
-        worksheet = get_google_sheet()
-        if not worksheet:
-            print("❌ Google Sheet နဲ့ ချိတ်ဆက်လို့မရပါ")
-            return
-            
-        # 2. Post ကနေ အချက်အလက်တွေ ထုတ်ယူမယ်
-        # Title (caption or text ရဲ့ ပထမစာကြောင်း 100 လုံး)
+        print(f"📨 New post from channel: {message.chat.title}")
+        
+        # Extract post data
+        title = ""
+        description = ""
+        
         if message.caption:
-            title = message.caption[:100] + "..." if len(message.caption) > 100 else message.caption
+            title = message.caption[:150] + "..." if len(message.caption) > 150 else message.caption
             description = message.caption
         elif message.text:
-            title = message.text[:100] + "..." if len(message.text) > 100 else message.text
+            title = message.text[:150] + "..." if len(message.text) > 150 else message.text
             description = message.text
         else:
             title = "Media Post"
             description = "No text content"
-            
-        # File URL ရှာမယ်
+        
+        # Get file URL if available
         file_url = ""
         if message.photo:
-            # အကြီးဆုံး photo ကို ယူမယ်
             file_id = message.photo[-1].file_id
             file = await context.bot.get_file(file_id)
             file_url = file.file_path
@@ -96,134 +93,217 @@ async def handle_channel_post(update: Update, context: ContextTypes.DEFAULT_TYPE
         elif message.document:
             file = await context.bot.get_file(message.document.file_id)
             file_url = file.file_path
-            
-        # Hashtags စုစည်းမယ်
+        
+        # Extract hashtags
         tags = []
-        if message.caption:
-            words = message.caption.split()
-            tags = [word for word in words if word.startswith("#")]
-        elif message.text:
-            words = message.text.split()
-            tags = [word for word in words if word.startswith("#")]
+        text_source = message.caption or message.text or ""
+        for word in text_source.split():
+            if word.startswith("#"):
+                tags.append(word)
+        
+        tags_str = ", ".join(tags) if tags else "general"
+        channel_name = message.chat.username or message.chat.title
+        
+        # Save to PostgreSQL
+        conn = get_db_connection()
+        if conn:
+            cur = conn.cursor()
+            cur.execute("""
+                INSERT INTO posts 
+                (telegram_message_id, post_title, post_description, file_url, tags, channel_username)
+                VALUES (%s, %s, %s, %s, %s, %s)
+            """, (message.message_id, title, description, file_url, tags_str, channel_name))
+            conn.commit()
             
-        tags_str = ", ".join(tags) if tags else "#telegram"
-        
-        # 3. Google Sheet ထဲကို data တန်ဖိုးတွေ ထည့်မယ်
-        from datetime import datetime
-        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        
-        new_row = [timestamp, title, description, file_url, tags_str]
-        worksheet.append_row(new_row)
-        
-        print(f"✅ Data written to Google Sheet: {title}")
-        print(f"   📊 Row added: {new_row}")
+            # Get the inserted post
+            cur.execute("SELECT * FROM posts WHERE id = %s", (cur.lastrowid,))
+            new_post = cur.fetchone()
+            
+            cur.close()
+            conn.close()
+            
+            print(f"✅ Post saved to database: {title[:50]}...")
+            return new_post
         
     except Exception as e:
-        print(f"❌ Error processing channel post: {e}")
+        print(f"❌ Error processing post: {e}")
+        return None
 
-# ====== 3. BOT MANAGER & BACKGROUND THREAD ======
+# ========== Bot Manager ==========
 class BotManager:
-    """Bot ကို background မှာ စီမံခန့်ခွဲဖို့ class"""
     def __init__(self):
         self.application = None
         self.is_running = False
-        
+    
     def start_bot(self):
-        """Bot ကို background thread ပေါ်မှာ စတင်မယ်"""
+        """Start Telegram bot in background thread"""
         if self.is_running:
             return
-            
+        
         token = os.environ.get('TELEGRAM_BOT_TOKEN')
         if not token:
-            print("❌ TELEGRAM_BOT_TOKEN environment variable မတွေ့ပါ")
+            print("❌ TELEGRAM_BOT_TOKEN not set")
             return
-            
+        
         try:
-            # 1. Google Sheets ကို test connection
-            print("🔧 Testing Google Sheets connection...")
-            sheet_test = get_google_sheet()
-            if sheet_test:
-                print("✅ Google Sheets connection test successful")
-            else:
-                print("⚠️ Google Sheets connection failed, but continuing...")
+            # Initialize database
+            if not init_database():
+                print("⚠️ Database initialization failed")
             
-            # 2. Telegram Bot Application ဖန်တီးမယ်
-            print("🤖 Creating Telegram Bot Application...")
+            # Create bot application
             self.application = Application.builder().token(token).build()
             
-            # 3. Channel post handler ကို ထည့်သွင်းမယ်
+            # Add channel post handler
             self.application.add_handler(
                 MessageHandler(filters.ChatType.CHANNEL, handle_channel_post)
             )
             
-            # 4. Bot ကို background thread ပေါ်မှာ စတင်မယ်
+            # Start bot in background
             self.is_running = True
-            bot_thread = threading.Thread(target=self.run_bot_polling, daemon=True)
+            bot_thread = threading.Thread(target=self.run_bot, daemon=True)
             bot_thread.start()
             
-            print("✅ Telegram Bot started successfully in background")
-            print("📱 Bot is now listening for channel posts...")
+            print("🤖 4UTODAY Bot started successfully")
+            print("📡 Listening for channel posts...")
             
         except Exception as e:
-            print(f"❌ Failed to start Telegram Bot: {e}")
+            print(f"❌ Failed to start bot: {e}")
             self.is_running = False
     
-    def run_bot_polling(self):
-        """Bot ကို polling mode နဲ့ run မယ် (background thread)"""
+    def run_bot(self):
+        """Run bot with polling"""
         try:
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
-            print("🔄 Starting bot polling...")
             self.application.run_polling()
         except Exception as e:
             print(f"❌ Bot polling error: {e}")
             self.is_running = False
 
-# BotManager instance ဖန်တီးပါ
+# Initialize bot manager
 bot_manager = BotManager()
 
-# ====== 4. FLASK ROUTES ======
+# ========== API Routes for Frontend ==========
 @app.route('/')
 def home():
-    """Root endpoint - Bot status ကို ပြမယ်"""
-    status = "running" if bot_manager.is_running else "not running"
-    return f"""
-    <h1>🚀 Telegram Auto-Poster Bot</h1>
-    <p>Status: <strong>{status}</strong></p>
-    <p>This bot listens to your Telegram channel and saves posts to Google Sheets.</p>
-    <hr>
-    <h3>Environment Check:</h3>
-    <ul>
-        <li>TELEGRAM_BOT_TOKEN: {'✅ Set' if os.environ.get('TELEGRAM_BOT_TOKEN') else '❌ Missing'}</li>
-        <li>GOOGLE_SHEET_ID: {'✅ Set' if os.environ.get('GOOGLE_SHEET_ID') else '❌ Missing'}</li>
-        <li>GOOGLE_CREDENTIALS_JSON: {'✅ Set' if os.environ.get('GOOGLE_CREDENTIALS_JSON') else '❌ Missing'}</li>
-    </ul>
-    <p>Check Render logs for detailed operation.</p>
-    """
+    return jsonify({
+        "service": "4UTODAY Telegram Bot API",
+        "status": "running",
+        "bot_status": "active" if bot_manager.is_running else "inactive",
+        "endpoints": {
+            "posts": "/api/posts",
+            "health": "/api/health",
+            "stats": "/api/stats"
+        }
+    })
 
-@app.route('/health')
+@app.route('/api/health')
 def health_check():
-    """Health check endpoint for monitoring"""
-    if bot_manager.is_running:
-        return "✅ Bot is healthy and running", 200
-    else:
-        return "⚠️ Bot is not running", 503
+    conn = get_db_connection()
+    db_status = "connected" if conn else "disconnected"
+    if conn:
+        conn.close()
+    
+    return jsonify({
+        "status": "healthy",
+        "bot_running": bot_manager.is_running,
+        "database": db_status,
+        "timestamp": datetime.now().isoformat()
+    })
 
-@app.route('/start-bot', methods=['POST'])
-def start_bot_manual():
-    """Manual bot start endpoint (if needed)"""
-    if not bot_manager.is_running:
-        bot_manager.start_bot()
-        return "🔄 Bot starting... Check logs for details.", 200
-    else:
-        return "✅ Bot is already running", 200
+@app.route('/api/posts')
+def get_posts():
+    """Get all posts for frontend"""
+    try:
+        conn = get_db_connection()
+        if not conn:
+            return jsonify({"error": "Database unavailable"}), 500
+        
+        cur = conn.cursor()
+        
+        # Get filter parameters
+        tag_filter = request.args.get('tag', 'all')
+        limit = int(request.args.get('limit', 50))
+        
+        # Build query
+        query = "SELECT * FROM posts ORDER BY created_at DESC LIMIT %s"
+        params = [limit]
+        
+        if tag_filter != 'all':
+            query = "SELECT * FROM posts WHERE tags LIKE %s ORDER BY created_at DESC LIMIT %s"
+            params = [f'%{tag_filter}%', limit]
+        
+        cur.execute(query, params)
+        posts = cur.fetchall()
+        
+        # Convert datetime to string for JSON
+        for post in posts:
+            if post['created_at']:
+                post['created_at'] = post['created_at'].isoformat()
+        
+        cur.close()
+        conn.close()
+        
+        return jsonify({
+            "count": len(posts),
+            "posts": posts
+        })
+        
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
-# ====== 5. APPLICATION STARTUP ======
+@app.route('/api/stats')
+def get_stats():
+    """Get statistics for dashboard"""
+    try:
+        conn = get_db_connection()
+        if not conn:
+            return jsonify({"error": "Database unavailable"}), 500
+        
+        cur = conn.cursor()
+        
+        # Get total posts
+        cur.execute("SELECT COUNT(*) as total FROM posts")
+        total = cur.fetchone()['total']
+        
+        # Get posts by tag
+        cur.execute("""
+            SELECT tags, COUNT(*) as count 
+            FROM posts 
+            GROUP BY tags 
+            ORDER BY count DESC 
+            LIMIT 10
+        """)
+        tags_stats = cur.fetchall()
+        
+        # Get recent activity
+        cur.execute("""
+            SELECT DATE(created_at) as date, COUNT(*) as count
+            FROM posts 
+            GROUP BY DATE(created_at) 
+            ORDER BY date DESC 
+            LIMIT 7
+        """)
+        activity = cur.fetchall()
+        
+        cur.close()
+        conn.close()
+        
+        return jsonify({
+            "total_posts": total,
+            "top_tags": tags_stats,
+            "recent_activity": activity
+        })
+        
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+# ========== Application Startup ==========
 if __name__ == '__main__':
-    # App စဖွင့်တာနဲ့ bot ကို auto-start လုပ်မယ်
-    print("🚀 Starting Flask application and Telegram Bot...")
+    # Start bot automatically
+    print("🚀 Starting 4UTODAY Telegram Bot...")
     bot_manager.start_bot()
     
-    # Flask app ကို start မယ်
+    # Start Flask server
     port = int(os.environ.get("PORT", 10000))
-    app.run(host='0.0.0.0', port=port)    
+    app.run(host='0.0.0.0', port=port, debug=False)
