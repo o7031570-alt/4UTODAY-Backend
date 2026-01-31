@@ -1,11 +1,10 @@
-# app.py - 4UTODAY Telegram Bot (Stable Webhook Version for Python 3.13)
+# app.py - 4UTODAY Telegram Bot (Webhook Sync Version)
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 import os
-import psycopg  # Version 3
+import psycopg
 from psycopg.rows import dict_row
 from telegram import Update, Bot
-import asyncio
 from datetime import datetime
 
 # ========== Flask App Setup ==========
@@ -14,24 +13,19 @@ CORS(app)
 
 # Environment Variables
 TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN')
-# Render URL (Environment Variable ထဲမှာ RENDER_EXTERNAL_URL ကို https://your-app.onrender.com လို့ ထည့်ထားပေးပါ)
 RENDER_URL = os.environ.get('RENDER_EXTERNAL_URL')
 WEBHOOK_PATH = f"/tg-hook-{TOKEN[:8] if TOKEN else 'default'}"
 WEBHOOK_URL = f"{RENDER_URL}{WEBHOOK_PATH}" if RENDER_URL else None
 
-# ========== Database Functions (Psycopg 3 Version) ==========
+# ========== Database Functions ==========
 def get_db_connection():
     try:
         db_url = os.environ.get('DATABASE_URL')
-        if not db_url:
-            print("❌ DATABASE_URL is missing")
-            return None
-        
-        # Psycopg 3 သည် SSL mode ကို connection string မှတစ်ဆင့် ကောင်းစွာ handle လုပ်နိုင်သည်
+        if not db_url: return None
         conn = psycopg.connect(db_url, row_factory=dict_row)
         return conn
     except Exception as e:
-        print(f"❌ Database connection failed: {e}")
+        print(f"❌ DB connection failed: {e}")
         return None
 
 def init_database():
@@ -56,34 +50,34 @@ def init_database():
         print("✅ Database table ready")
         return True
     except Exception as e:
-        print(f"❌ Database init error: {e}")
+        print(f"❌ DB init error: {e}")
         return False
 
-# ========== Webhook Handling Logic ==========
+# ========== SYNC Webhook Handler ==========
 @app.route(WEBHOOK_PATH, methods=['POST'])
-async def telegram_webhook():
+def telegram_webhook():  # CHANGED: Removed 'async'
     try:
         data = request.get_json(force=True)
-        async with Bot(TOKEN) as bot:
-            update = Update.de_json(data, bot)
-            if update.channel_post:
-                await process_post(update.channel_post, bot)
+        bot = Bot(TOKEN)  # CHANGED: Removed 'async with', use regular Bot
+        update = Update.de_json(data, bot)
+        if update.channel_post:
+            process_post(update.channel_post, bot)  # CHANGED: Removed 'await'
         return "OK", 200
     except Exception as e:
         print(f"❌ Webhook Error: {e}")
         return "Error", 500
 
-async def process_post(message, bot):
+def process_post(message, bot):  # CHANGED: Removed 'async'
     try:
         text = message.caption or message.text or ""
         title = text[:150] + "..." if len(text) > 150 else (text or "Media Post")
         
         file_url = ""
         if message.photo:
-            file = await bot.get_file(message.photo[-1].file_id)
+            file = bot.get_file(message.photo[-1].file_id)  # CHANGED: Removed 'await'
             file_url = file.file_path
         elif message.video:
-            file = await bot.get_file(message.video.file_id)
+            file = bot.get_file(message.video.file_id)      # CHANGED: Removed 'await'
             file_url = file.file_path
 
         tags = [word for word in text.split() if word.startswith("#")]
@@ -104,32 +98,22 @@ async def process_post(message, bot):
     except Exception as e:
         print(f"❌ Post processing error: {e}")
 
-# ========== Startup Configuration ==========
+# ========== Startup Config ==========
 def setup_webhook():
-    """Initialize DB and Set Webhook during Startup"""
     init_database()
     if not TOKEN or not WEBHOOK_URL:
-        print("⚠️ Token or URL missing. Skipping Webhook Setup.")
+        print("⚠️ Token/URL missing. Skipping Webhook Setup.")
         return
-
-    async def set_it():
-        try:
-            async with Bot(TOKEN) as bot:
-                await bot.set_webhook(url=WEBHOOK_URL)
-                print(f"🌐 Webhook successfully set to: {WEBHOOK_URL}")
-        except Exception as e:
-            print(f"❌ Webhook setting failed: {e}")
-
     try:
-        # Flask 3.0+ setup
-        asyncio.run(set_it())
+        bot = Bot(TOKEN)
+        bot.set_webhook(url=WEBHOOK_URL)  # CHANGED: Direct sync call
+        print(f"🌐 Webhook set: {WEBHOOK_URL}")
     except Exception as e:
-        print(f"❌ Startup Async error: {e}")
+        print(f"❌ Webhook setup failed: {e}")
 
-# Run setup once before app starts
 setup_webhook()
 
-# ========== API Endpoints (မူရင်းအတိုင်း) ==========
+# ========== API Endpoints (Same as before) ==========
 @app.route('/')
 def home():
     return jsonify({"service": "4UTODAY API", "status": "online", "webhook_url": WEBHOOK_URL})
@@ -143,7 +127,6 @@ def get_posts():
     try:
         conn = get_db_connection()
         if not conn: return jsonify({"error": "DB connection failed"}), 500
-        
         with conn.cursor() as cur:
             cur.execute("SELECT * FROM posts ORDER BY created_at DESC LIMIT 50")
             posts = cur.fetchall()
@@ -161,7 +144,6 @@ def get_stats():
         with conn.cursor() as cur:
             cur.execute("SELECT COUNT(*) as total FROM posts")
             total = cur.fetchone()['total']
-            
             cur.execute("SELECT tags, COUNT(*) as count FROM posts GROUP BY tags ORDER BY count DESC LIMIT 5")
             tags = cur.fetchall()
         conn.close()
