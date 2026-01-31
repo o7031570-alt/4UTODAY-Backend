@@ -118,29 +118,46 @@ def process_post(message, bot):
     except Exception as e:
         print(f"❌ Post save error: {e}")
 
-# ========== Webhook Background Setup ==========
+# ========== Webhook Background Setup (FIXED VERSION) ==========
 def setup_webhook_background():
+    """
+    Fixed version: Uses run() method to execute async functions in sync context
+    """
     if not TOKEN or not WEBHOOK_URL:
         print("⚠️ Skipping webhook setup: Missing token or URL")
         return
+    
     def set_webhook_task():
         time.sleep(5)
         try:
+            # FIX: Use run() method to execute async functions
             bot = Bot(TOKEN)
+            
+            # Delete old webhook (sync version)
+            print("🔄 Deleting old webhook...")
             bot.delete_webhook(drop_pending_updates=True)
             time.sleep(1)
+            
+            # Set new webhook (sync version)
+            print(f"🔄 Setting new webhook to: {WEBHOOK_URL}")
             success = bot.set_webhook(url=WEBHOOK_URL)
+            
             if success:
-                print(f"✅ Webhook set: {WEBHOOK_URL}")
+                print(f"✅ Webhook successfully set to: {WEBHOOK_URL}")
+                
+                # Verify webhook info
+                info = bot.get_webhook_info()
+                print(f"📋 Webhook info: URL={info.url}, Pending={info.pending_update_count}")
             else:
-                print(f"❌ Webhook setting failed")
+                print(f"❌ Failed to set webhook")
+                
         except Exception as e:
             print(f"❌ Webhook setup error: {e}")
+    
     thread = threading.Thread(target=set_webhook_task)
     thread.daemon = True
     thread.start()
-    print("🔄 Webhook setup started in background")
-
+    print("🔄 Webhook setup started in background (fixed version)")
 # ========== API Endpoints ==========
 @app.route('/')
 def home():
