@@ -1,7 +1,5 @@
-gspread
-google-auth
-google-auth-oauthlib
-google-auth-httplib2
-Flask>=2.3.0
-gunicorn
-python-telegram-bot>=20.0  # <-- ဒီစာကြောင်း အသစ်ထည့်ပါ
+Flask==2.3.0
+Flask-CORS==4.0.0
+python-telegram-bot==20.0
+psycopg2-binary==2.9.9
+gunicorn==21.2.0
