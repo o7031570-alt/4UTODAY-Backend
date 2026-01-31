@@ -1,19 +1,21 @@
 services:
   - type: web
-    name: futoday-bot
+    name: fouru-backend
     runtime: python
     buildCommand: pip install -r requirements.txt
     startCommand: gunicorn app:app
     envVars:
       - key: TELEGRAM_BOT_TOKEN
         sync: false
+      - key: RENDER_EXTERNAL_URL
+        fromContext: instanceUrl
       - key: DATABASE_URL
         fromDatabase:
-          name: futoday-db
+          name: fouru-db
           property: connectionString
 
 databases:
-  - name: futoday-db
+  - name: fouru-db
     plan: free
-    databaseName: futoday_db
-    user: futoday_user
+    databaseName: fouru_today_db
+    user: fouru_admin
