@@ -4,3 +4,4 @@ google-auth-oauthlib
 google-auth-httplib2
 Flask>=2.3.0
 gunicorn
+python-telegram-bot>=20.0  # <-- ဒီစာကြောင်း အသစ်ထည့်ပါ
