@@ -1,44 +1,62 @@
-# app.py - 4UTODAY Telegram Bot (Polling Version - Stable for Free Tier)
-from flask import Flask, jsonify
+# app.py - 4UTODAY Telegram Bot (FINAL STABLE VERSION)
+from flask import Flask, request, jsonify
 from flask_cors import CORS
 import os
 import psycopg
 from psycopg.rows import dict_row
-from telegram import Bot
-from datetime import datetime, timedelta
-import requests  # For making HTTP requests to Telegram API
+from telegram import Update, Bot
+from datetime import datetime
+import threading
+import time
 
 # ========== Flask App Setup ==========
 app = Flask(__name__)
 CORS(app)
 
-# Environment Variables
+# ========== Environment Variables ==========
+# Use RENDER_EXTERNAL_URL if available, otherwise try RENDER_URL
+RENDER_URL = os.environ.get('RENDER_EXTERNAL_URL') or os.environ.get('RENDER_URL')
 TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN')
-CHANNEL_USERNAME = os.environ.get('CHANNEL_USERNAME', '@your_channel_username')  # Your channel username
+DATABASE_URL = os.environ.get('DATABASE_URL')
+CHANNEL_ID = os.environ.get('TELEGRAM_CHANNEL_ID')
 
-# ========== Database Functions (Psycopg 3 Version) ==========
+# Calculate webhook path from TOKEN (first 8 chars)
+if TOKEN:
+    WEBHOOK_PATH = f"/tg-hook-{TOKEN[:8]}"
+    WEBHOOK_URL = f"{RENDER_URL}{WEBHOOK_PATH}" if RENDER_URL else None
+else:
+    WEBHOOK_PATH = "/tg-hook-default"
+    WEBHOOK_URL = None
+
+print(f"🔧 Configuration Check:")
+print(f"   - TOKEN exists: {'✅ Yes' if TOKEN else '❌ No'}")
+print(f"   - DATABASE_URL exists: {'✅ Yes' if DATABASE_URL else '❌ No'}")
+print(f"   - RENDER_URL: {RENDER_URL}")
+print(f"   - Webhook URL: {WEBHOOK_URL}")
+
+# ========== Database Functions ==========
 def get_db_connection():
+    if not DATABASE_URL:
+        return None
     try:
-        db_url = os.environ.get('DATABASE_URL')
-        if not db_url:
-            print("❌ DATABASE_URL is missing")
-            return None
-        conn = psycopg.connect(db_url, row_factory=dict_row)
+        conn = psycopg.connect(DATABASE_URL, row_factory=dict_row)
         return conn
     except Exception as e:
-        print(f"❌ Database connection failed: {e}")
+        print(f"❌ DB connection error: {e}")
         return None
 
 def init_database():
     conn = get_db_connection()
-    if not conn: return False
+    if not conn:
+        print("❌ Cannot initialize DB: No connection")
+        return False
     try:
         with conn.cursor() as cur:
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS posts (
                     id SERIAL PRIMARY KEY,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    telegram_message_id BIGINT UNIQUE,  -- ADD UNIQUE constraint
+                    telegram_message_id BIGINT UNIQUE,
                     post_title TEXT NOT NULL,
                     post_description TEXT,
                     file_url TEXT,
@@ -48,92 +66,107 @@ def init_database():
             """)
             conn.commit()
         conn.close()
-        print("✅ Database table ready")
+        print("✅ Database table 'posts' is ready")
         return True
     except Exception as e:
-        print(f"❌ Database init error: {e}")
+        print(f"❌ DB init error: {e}")
         return False
 
-# ========== Polling Logic ==========
-def check_new_posts():
-    """
-    This function should be called periodically (e.g., every 5-10 minutes)
-    via Render Cron Job or another scheduler.
-    """
-    if not TOKEN or not CHANNEL_USERNAME:
-        print("⚠️ Token or Channel username missing. Skipping check.")
-        return {"status": "error", "message": "Missing credentials"}
-
-    bot = Bot(TOKEN)
+# ========== SYNC Webhook Handler ==========
+@app.route(WEBHOOK_PATH, methods=['POST'])
+def telegram_webhook():
     try:
-        # 1. Get the last saved message ID from database
-        last_message_id = None
+        data = request.get_json(force=True)
+        bot = Bot(TOKEN)
+        update = Update.de_json(data, bot)
+        if update.channel_post:
+            process_post(update.channel_post, bot)
+        return "OK", 200
+    except Exception as e:
+        print(f"❌ Webhook error: {e}")
+        return "Error", 500
+
+def process_post(message, bot):
+    try:
+        text = message.caption or message.text or ""
+        title = text[:100] + "..." if len(text) > 100 else text or "Media Post"
+        
+        file_url = ""
+        if message.photo:
+            file = bot.get_file(message.photo[-1].file_id)
+            file_url = file.file_path
+        elif message.video:
+            file = bot.get_file(message.video.file_id)
+            file_url = file.file_path
+
+        tags = [word for word in text.split() if word.startswith("#")]
+        tags_str = ", ".join(tags) if tags else "general"
+        channel_name = message.chat.title or message.chat.username or "Unknown"
+
         conn = get_db_connection()
         if conn:
             with conn.cursor() as cur:
-                cur.execute("SELECT MAX(telegram_message_id) as last_id FROM posts")
-                result = cur.fetchone()
-                last_message_id = result['last_id'] if result['last_id'] else 0
+                cur.execute("""
+                    INSERT INTO posts (telegram_message_id, post_title, post_description, file_url, tags, channel_username)
+                    VALUES (%s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (telegram_message_id) DO NOTHING
+                """, (message.message_id, title, text, file_url, tags_str, channel_name))
+                conn.commit()
+                if cur.rowcount > 0:
+                    print(f"✅ Saved Post: {title[:50]}")
             conn.close()
-
-        # 2. Fetch recent posts from channel (last 20 messages)
-        # Using Telegram Bot API directly via python-telegram-bot
-        from telegram.constants import ParseMode
-        updates = bot.get_updates(offset=last_message_id + 1, timeout=10)
-        
-        new_posts_count = 0
-        for update in updates:
-            if update.channel_post and update.channel_post.chat.username == CHANNEL_USERNAME.lstrip('@'):
-                message = update.channel_post
-                
-                # Check if already exists in DB
-                conn = get_db_connection()
-                if conn:
-                    with conn.cursor() as cur:
-                        cur.execute("SELECT id FROM posts WHERE telegram_message_id = %s", (message.message_id,))
-                        exists = cur.fetchone()
-                        
-                        if not exists:
-                            # Process and save the post
-                            text = message.caption or message.text or ""
-                            title = text[:150] + "..." if len(text) > 150 else (text or "Media Post")
-                            
-                            file_url = ""
-                            if message.photo:
-                                file = bot.get_file(message.photo[-1].file_id)
-                                file_url = file.file_path
-                            elif message.video:
-                                file = bot.get_file(message.video.file_id)
-                                file_url = file.file_path
-
-                            tags = [word for word in text.split() if word.startswith("#")]
-                            tags_str = ", ".join(tags) if tags else "general"
-                            
-                            cur.execute("""
-                                INSERT INTO posts 
-                                (telegram_message_id, post_title, post_description, file_url, tags, channel_username)
-                                VALUES (%s, %s, %s, %s, %s, %s)
-                            """, (message.message_id, title, text, file_url, tags_str, CHANNEL_USERNAME))
-                            conn.commit()
-                            new_posts_count += 1
-                            print(f"✅ Saved new post: {title[:30]}")
-                    conn.close()
-
-        print(f"🔍 Polling complete. Found {new_posts_count} new posts.")
-        return {"status": "success", "new_posts": new_posts_count}
-
     except Exception as e:
-        print(f"❌ Polling error: {e}")
-        return {"status": "error", "message": str(e)}
+        print(f"❌ Post save error: {e}")
 
+# ========== Webhook Background Setup (FIXED VERSION) ==========
+def setup_webhook_background():
+    """
+    Fixed version: Uses run() method to execute async functions in sync context
+    """
+    if not TOKEN or not WEBHOOK_URL:
+        print("⚠️ Skipping webhook setup: Missing token or URL")
+        return
+    
+    def set_webhook_task():
+        time.sleep(5)
+        try:
+            # FIX: Use run() method to execute async functions
+            bot = Bot(TOKEN)
+            
+            # Delete old webhook (sync version)
+            print("🔄 Deleting old webhook...")
+            bot.delete_webhook(drop_pending_updates=True)
+            time.sleep(1)
+            
+            # Set new webhook (sync version)
+            print(f"🔄 Setting new webhook to: {WEBHOOK_URL}")
+            success = bot.set_webhook(url=WEBHOOK_URL)
+            
+            if success:
+                print(f"✅ Webhook successfully set to: {WEBHOOK_URL}")
+                
+                # Verify webhook info
+                info = bot.get_webhook_info()
+                print(f"📋 Webhook info: URL={info.url}, Pending={info.pending_update_count}")
+            else:
+                print(f"❌ Failed to set webhook")
+                
+        except Exception as e:
+            print(f"❌ Webhook setup error: {e}")
+    
+    thread = threading.Thread(target=set_webhook_task)
+    thread.daemon = True
+    thread.start()
+    print("🔄 Webhook setup started in background (fixed version)")
 # ========== API Endpoints ==========
 @app.route('/')
 def home():
     return jsonify({
-        "service": "4UTODAY API (Polling Mode)",
+        "service": "4UTODAY API",
         "status": "online",
-        "polling_endpoint": "/api/check-posts",
-        "note": "Use Render Cron Job to schedule /api/check-posts"
+        "webhook_configured": bool(TOKEN and WEBHOOK_URL),
+        "webhook_url": WEBHOOK_URL,
+        "endpoints": ["/api/posts", "/api/health", "/api/stats"]
     })
 
 @app.route('/api/health')
@@ -144,13 +177,14 @@ def health():
 def get_posts():
     try:
         conn = get_db_connection()
-        if not conn: return jsonify({"error": "DB connection failed"}), 500
-        
+        if not conn:
+            return jsonify({"error": "DB connection failed"}), 500
         with conn.cursor() as cur:
             cur.execute("SELECT * FROM posts ORDER BY created_at DESC LIMIT 50")
             posts = cur.fetchall()
             for p in posts:
-                p['created_at'] = p['created_at'].isoformat()
+                if 'created_at' in p and p['created_at']:
+                    p['created_at'] = p['created_at'].isoformat()
         conn.close()
         return jsonify(posts)
     except Exception as e:
@@ -163,23 +197,23 @@ def get_stats():
         with conn.cursor() as cur:
             cur.execute("SELECT COUNT(*) as total FROM posts")
             total = cur.fetchone()['total']
-            
             cur.execute("SELECT tags, COUNT(*) as count FROM posts GROUP BY tags ORDER BY count DESC LIMIT 5")
             tags = cur.fetchall()
         conn.close()
-        return jsonify({"total": total, "tags": tags})
+        return jsonify({"total_posts": total, "top_tags": tags})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-# 👇 This endpoint can be called manually or by Render Cron Job
-@app.route('/api/check-posts')
-def trigger_check():
-    result = check_new_posts()
-    return jsonify(result)
+# ========== Startup ==========
+def startup():
+    print("🚀 Starting 4UTODAY Bot...")
+    init_database()
+    setup_webhook_background()
+    print("✅ Startup completed")
 
-# Initialize database on startup
-init_database()
+startup()
 
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 10000))
-    app.run(host='0.0.0.0', port=port)
+    app.run(host='0.0.0.0', port=port, debug=False)
+      
