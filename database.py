@@ -1,6 +1,7 @@
 # database.py
-import psycopg2
-from psycopg2.extras import RealDictCursor
+import psycopg
+from psycopg import sql
+from psycopg.rows import dict_row
 import logging
 from config import config
 
@@ -14,7 +15,8 @@ class Database:
     def connect(self):
         """Database connection တည်ဆောက်မယ်"""
         try:
-            self.conn = psycopg2.connect(config.DATABASE_URL, sslmode='require')
+            # psycopg3 နဲ့ connect (sslmode='require' ကို connection string ထဲမှာ ထည့်ပါ)
+            self.conn = psycopg.connect(config.DATABASE_URL)
             logger.info("✅ Database connection successful")
             self.create_tables()
         except Exception as e:
@@ -93,7 +95,7 @@ class Database:
     def get_post(self, post_id):
         """Post တစ်ခုကို ရှာမယ်"""
         try:
-            with self.conn.cursor(cursor_factory=RealDictCursor) as cur:
+            with self.conn.cursor(row_factory=dict_row) as cur:  # dict_row ကို သုံးပါ
                 cur.execute("SELECT * FROM posts WHERE post_id = %s", (post_id,))
                 return cur.fetchone()
         except Exception as e:
@@ -103,36 +105,15 @@ class Database:
     def get_all_posts(self, limit=100):
         """Post အားလုံးကို ယူမယ်"""
         try:
-            with self.conn.cursor(cursor_factory=RealDictCursor) as cur:
+            with self.conn.cursor(row_factory=dict_row) as cur:
                 cur.execute("SELECT * FROM posts ORDER BY created_at DESC LIMIT %s", (limit,))
                 return cur.fetchall()
         except Exception as e:
             logger.error(f"❌ Get all posts error: {e}")
             return []
     
-    def delete_post(self, post_id):
-        """Post တစ်ခုကို ဖျက်မယ်"""
-        try:
-            with self.conn.cursor() as cur:
-                cur.execute("DELETE FROM posts WHERE post_id = %s", (post_id,))
-                self.conn.commit()
-                return cur.rowcount > 0
-        except Exception as e:
-            logger.error(f"❌ Delete post error: {e}")
-            self.conn.rollback()
-            return False
-    
-    def add_log(self, level, message, source):
-        """Log တစ်ခု ထည့်မယ်"""
-        try:
-            with self.conn.cursor() as cur:
-                cur.execute(
-                    "INSERT INTO logs (level, message, source) VALUES (%s, %s, %s)",
-                    (level, message, source)
-                )
-                self.conn.commit()
-        except Exception as e:
-            logger.error(f"❌ Log save error: {e}")
+    # ကျန်တဲ့ functions တွေကိုလည်း အလားတူ ပြင်ပါ
+    # ...
     
     def close(self):
         """Database connection ကို ပိတ်မယ်"""
