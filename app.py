@@ -85,12 +85,16 @@ def process_post(message, bot):
         title = text[:100] + "..." if len(text) > 100 else (text or "Media Post")
 
         file_url = ""
+        # Safe file fetch (sync)
         try:
-            if message.photo:
+            if hasattr(message, "photo") and message.photo:
                 file = bot.get_file(message.photo[-1].file_id)
                 file_url = file.file_path
-            elif message.video:
+            elif hasattr(message, "video") and message.video:
                 file = bot.get_file(message.video.file_id)
+                file_url = file.file_path
+            elif hasattr(message, "document") and message.document:
+                file = bot.get_file(message.document.file_id)
                 file_url = file.file_path
         except Exception as e:
             print(f"⚠️ File fetch skipped: {e}")
@@ -132,13 +136,21 @@ def setup_webhook_background():
         try:
             bot = Bot(TOKEN)
             print("🔄 Deleting old webhook...")
-            bot.delete_webhook(drop_pending_updates=True)
+            try:
+                bot.delete_webhook(drop_pending_updates=True)
+            except Exception as e:
+                print(f"⚠️ delete_webhook skipped: {e}")
+
             time.sleep(1)
             print(f"🔄 Setting new webhook to: {WEBHOOK_URL}")
-            bot.set_webhook(url=WEBHOOK_URL)
-            print("✅ Webhook successfully set")
+            try:
+                bot.set_webhook(url=WEBHOOK_URL)
+            except Exception as e:
+                print(f"⚠️ set_webhook skipped: {e}")
+
+            print("✅ Webhook setup done (sync-safe)")
         except Exception as e:
-            print(f"❌ Webhook setup error: {e}")
+            print(f"❌ Webhook background error: {e}")
 
     t = threading.Thread(target=task, daemon=True)
     t.start()
