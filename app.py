@@ -1,9 +1,9 @@
-# app.py - 4UTODAY Telegram Bot with PostgreSQL (Webhook Version - Fixed for Flask 3.0+)
+# app.py - 4UTODAY Telegram Bot (Stable Webhook Version for Python 3.13)
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 import os
-import psycopg2
-from psycopg2.extras import RealDictCursor
+import psycopg  # Version 3
+from psycopg.rows import dict_row
 from telegram import Update, Bot
 import asyncio
 from datetime import datetime
@@ -14,19 +14,21 @@ CORS(app)
 
 # Environment Variables
 TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN')
-# Render URL setup
+# Render URL (Environment Variable ထဲမှာ RENDER_EXTERNAL_URL ကို https://your-app.onrender.com လို့ ထည့်ထားပေးပါ)
 RENDER_URL = os.environ.get('RENDER_EXTERNAL_URL')
-WEBHOOK_PATH = f"/tg-{TOKEN[:8]}" # Security suffix
+WEBHOOK_PATH = f"/tg-hook-{TOKEN[:8] if TOKEN else 'default'}"
 WEBHOOK_URL = f"{RENDER_URL}{WEBHOOK_PATH}" if RENDER_URL else None
 
-# ========== Database Functions ==========
+# ========== Database Functions (Psycopg 3 Version) ==========
 def get_db_connection():
     try:
         db_url = os.environ.get('DATABASE_URL')
-        if not db_url: return None
-        if "sslmode" not in db_url:
-            db_url += ("&" if "?" in db_url else "?") + "sslmode=require"
-        conn = psycopg2.connect(db_url, cursor_factory=RealDictCursor)
+        if not db_url:
+            print("❌ DATABASE_URL is missing")
+            return None
+        
+        # Psycopg 3 သည် SSL mode ကို connection string မှတစ်ဆင့် ကောင်းစွာ handle လုပ်နိုင်သည်
+        conn = psycopg.connect(db_url, row_factory=dict_row)
         return conn
     except Exception as e:
         print(f"❌ Database connection failed: {e}")
@@ -36,21 +38,20 @@ def init_database():
     conn = get_db_connection()
     if not conn: return False
     try:
-        cur = conn.cursor()
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS posts (
-                id SERIAL PRIMARY KEY,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                telegram_message_id BIGINT,
-                post_title TEXT NOT NULL,
-                post_description TEXT,
-                file_url TEXT,
-                tags TEXT,
-                channel_username VARCHAR(255)
-            )
-        """)
-        conn.commit()
-        cur.close()
+        with conn.cursor() as cur:
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS posts (
+                    id SERIAL PRIMARY KEY,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    telegram_message_id BIGINT,
+                    post_title TEXT NOT NULL,
+                    post_description TEXT,
+                    file_url TEXT,
+                    tags TEXT,
+                    channel_username VARCHAR(255)
+                )
+            """)
+            conn.commit()
         conn.close()
         print("✅ Database table ready")
         return True
@@ -58,98 +59,115 @@ def init_database():
         print(f"❌ Database init error: {e}")
         return False
 
-# ========== Webhook Handling ==========
+# ========== Webhook Handling Logic ==========
 @app.route(WEBHOOK_PATH, methods=['POST'])
 async def telegram_webhook():
     try:
         data = request.get_json(force=True)
-        update = Update.de_json(data, Bot(TOKEN))
-        if update.channel_post:
-            await process_post(update.channel_post)
+        async with Bot(TOKEN) as bot:
+            update = Update.de_json(data, bot)
+            if update.channel_post:
+                await process_post(update.channel_post, bot)
         return "OK", 200
     except Exception as e:
-        print(f"❌ Webhook Processing Error: {e}")
+        print(f"❌ Webhook Error: {e}")
         return "Error", 500
 
-async def process_post(message):
+async def process_post(message, bot):
     try:
         text = message.caption or message.text or ""
         title = text[:150] + "..." if len(text) > 150 else (text or "Media Post")
         
         file_url = ""
-        bot = Bot(TOKEN)
         if message.photo:
             file = await bot.get_file(message.photo[-1].file_id)
             file_url = file.file_path
         elif message.video:
             file = await bot.get_file(message.video.file_id)
             file_url = file.file_path
-        
+
         tags = [word for word in text.split() if word.startswith("#")]
         tags_str = ", ".join(tags) if tags else "general"
-        
+        channel_name = message.chat.title or message.chat.username or "Unknown"
+
         conn = get_db_connection()
         if conn:
-            cur = conn.cursor()
-            cur.execute("""
-                INSERT INTO posts (telegram_message_id, post_title, post_description, file_url, tags, channel_username)
-                VALUES (%s, %s, %s, %s, %s, %s)
-            """, (message.message_id, title, text, file_url, tags_str, message.chat.title))
-            conn.commit()
-            cur.close()
+            with conn.cursor() as cur:
+                cur.execute("""
+                    INSERT INTO posts 
+                    (telegram_message_id, post_title, post_description, file_url, tags, channel_username)
+                    VALUES (%s, %s, %s, %s, %s, %s)
+                """, (message.message_id, title, text, file_url, tags_str, channel_name))
+                conn.commit()
             conn.close()
-            print(f"✅ Saved: {title[:30]}")
+            print(f"✅ Saved Post: {title[:30]}")
     except Exception as e:
-        print(f"❌ Post logic error: {e}")
+        print(f"❌ Post processing error: {e}")
 
-# Webhook Setup Function (Manual initialization)
+# ========== Startup Configuration ==========
 def setup_webhook():
-    """Set up webhook and initialize database manually before app starts"""
+    """Initialize DB and Set Webhook during Startup"""
     init_database()
     if not TOKEN or not WEBHOOK_URL:
-        print("⚠️ Bot Token or Webhook URL is missing. Skipping webhook setup.")
+        print("⚠️ Token or URL missing. Skipping Webhook Setup.")
         return
 
-    async def set_webhook():
+    async def set_it():
         try:
-            bot = Bot(TOKEN)
-            await bot.set_webhook(url=WEBHOOK_URL)
-            print(f"🌐 Webhook linked: {WEBHOOK_URL}")
+            async with Bot(TOKEN) as bot:
+                await bot.set_webhook(url=WEBHOOK_URL)
+                print(f"🌐 Webhook successfully set to: {WEBHOOK_URL}")
         except Exception as e:
-            print(f"❌ Webhook setup failed: {e}")
+            print(f"❌ Webhook setting failed: {e}")
 
     try:
-        asyncio.run(set_webhook())
+        # Flask 3.0+ setup
+        asyncio.run(set_it())
     except Exception as e:
-        print(f"❌ Asyncio run error: {e}")
+        print(f"❌ Startup Async error: {e}")
 
-# ========== API Routes ==========
+# Run setup once before app starts
+setup_webhook()
+
+# ========== API Endpoints (မူရင်းအတိုင်း) ==========
 @app.route('/')
 def home():
-    return jsonify({"service": "4UTODAY API", "status": "running", "webhook": WEBHOOK_URL})
+    return jsonify({"service": "4UTODAY API", "status": "online", "webhook_url": WEBHOOK_URL})
 
 @app.route('/api/health')
 def health():
-    return jsonify({"status": "healthy", "now": datetime.now().isoformat()})
+    return jsonify({"status": "healthy", "timestamp": datetime.now().isoformat()})
 
 @app.route('/api/posts')
 def get_posts():
     try:
         conn = get_db_connection()
-        cur = conn.cursor()
-        cur.execute("SELECT * FROM posts ORDER BY created_at DESC LIMIT 50")
-        posts = cur.fetchall()
-        for p in posts: p['created_at'] = p['created_at'].isoformat()
-        cur.close()
+        if not conn: return jsonify({"error": "DB connection failed"}), 500
+        
+        with conn.cursor() as cur:
+            cur.execute("SELECT * FROM posts ORDER BY created_at DESC LIMIT 50")
+            posts = cur.fetchall()
+            for p in posts:
+                p['created_at'] = p['created_at'].isoformat()
         conn.close()
         return jsonify(posts)
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-# ========== App Initialization ==========
-# Flask 3.0+ မှာ before_first_request မရှိတော့လို့ 
-# App မ run ခင် ဒီကနေ တိုက်ရိုက် ခေါ်ပေးရပါတယ်။
-setup_webhook()
+@app.route('/api/stats')
+def get_stats():
+    try:
+        conn = get_db_connection()
+        with conn.cursor() as cur:
+            cur.execute("SELECT COUNT(*) as total FROM posts")
+            total = cur.fetchone()['total']
+            
+            cur.execute("SELECT tags, COUNT(*) as count FROM posts GROUP BY tags ORDER BY count DESC LIMIT 5")
+            tags = cur.fetchall()
+        conn.close()
+        return jsonify({"total": total, "tags": tags})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 10000))
