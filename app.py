@@ -1,222 +1,192 @@
-# app.py - 4UTODAY Telegram Bot (FINAL FIXED VERSION)
-
+# app.py
 from flask import Flask, request, jsonify
 from flask_cors import CORS
-import os
-import psycopg
-from psycopg.rows import dict_row
-from telegram import Update, Bot
+import logging
 from datetime import datetime
-import threading
-import time
 
-# ========== Flask App Setup ==========
+# Import our modules
+from config import config
+from database import db
+from telegram_bot import telegram_bot, setup_webhook_sync
+
+# Setup logging
+logging.basicConfig(
+    level=getattr(logging, config.LOG_LEVEL),
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
+# Initialize Flask app
 app = Flask(__name__)
 CORS(app)
 
-# ========== Environment Variables ==========
-RENDER_URL = os.environ.get('RENDER_EXTERNAL_URL') or os.environ.get('RENDER_URL')
-TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN')
-DATABASE_URL = os.environ.get('DATABASE_URL')
-CHANNEL_ID = os.environ.get('TELEGRAM_CHANNEL_ID')
-
-if TOKEN:
-    WEBHOOK_PATH = f"/tg-hook-{TOKEN[:8]}"
-    WEBHOOK_URL = f"{RENDER_URL}{WEBHOOK_PATH}" if RENDER_URL else None
-else:
-    WEBHOOK_PATH = "/tg-hook-default"
-    WEBHOOK_URL = None
-
-print("🔧 Configuration Check:")
-print(f"   - TOKEN exists: {'✅ Yes' if TOKEN else '❌ No'}")
-print(f"   - DATABASE_URL exists: {'✅ Yes' if DATABASE_URL else '❌ No'}")
-print(f"   - RENDER_URL: {RENDER_URL}")
-print(f"   - Webhook URL: {WEBHOOK_URL}")
-
-# ========== Database Functions ==========
-def get_db_connection():
-    if not DATABASE_URL:
-        return None
-    try:
-        return psycopg.connect(DATABASE_URL, row_factory=dict_row)
-    except Exception as e:
-        print(f"❌ DB connection error: {e}")
-        return None
-
-def init_database():
-    conn = get_db_connection()
-    if not conn:
-        print("❌ Cannot initialize DB")
-        return
-    with conn.cursor() as cur:
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS posts (
-                id SERIAL PRIMARY KEY,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                telegram_message_id BIGINT UNIQUE,
-                post_title TEXT NOT NULL,
-                post_description TEXT,
-                file_url TEXT,
-                tags TEXT,
-                channel_username VARCHAR(255)
-            )
-        """)
-        conn.commit()
-    conn.close()
-    print("✅ Database table 'posts' is ready")
-
-# ========== Telegram Webhook Handler ==========
-@app.route(WEBHOOK_PATH, methods=['POST'])
-def telegram_webhook():
-    try:
-        data = request.get_json(force=True)
-        bot = Bot(TOKEN)
-        update = Update.de_json(data, bot)
-        if update and update.channel_post:
-            process_post(update.channel_post, bot)
-        return "OK", 200
-    except Exception as e:
-        print(f"❌ Webhook error: {e}")
-        return "Error", 500
-
-def process_post(message, bot):
-    try:
-        text = message.caption or message.text or ""
-        title = text[:100] + "..." if len(text) > 100 else (text or "Media Post")
-
-        file_url = ""
-        # Safe file fetch (sync)
-        try:
-            if hasattr(message, "photo") and message.photo:
-                file = bot.get_file(message.photo[-1].file_id)
-                file_url = file.file_path
-            elif hasattr(message, "video") and message.video:
-                file = bot.get_file(message.video.file_id)
-                file_url = file.file_path
-            elif hasattr(message, "document") and message.document:
-                file = bot.get_file(message.document.file_id)
-                file_url = file.file_path
-        except Exception as e:
-            print(f"⚠️ File fetch skipped: {e}")
-
-        tags = [w for w in text.split() if w.startswith("#")]
-        tags_str = ", ".join(tags) if tags else "general"
-        channel_name = message.chat.title or message.chat.username or "Unknown"
-
-        conn = get_db_connection()
-        if conn:
-            with conn.cursor() as cur:
-                cur.execute("""
-                    INSERT INTO posts
-                    (telegram_message_id, post_title, post_description, file_url, tags, channel_username)
-                    VALUES (%s, %s, %s, %s, %s, %s)
-                    ON CONFLICT (telegram_message_id) DO NOTHING
-                """, (
-                    message.message_id,
-                    title,
-                    text,
-                    file_url,
-                    tags_str,
-                    channel_name
-                ))
-                conn.commit()
-            conn.close()
-            print(f"✅ Saved Post: {title[:50]}")
-    except Exception as e:
-        print(f"❌ Post save error: {e}")
-
-# ========== Webhook Background Setup (SAFE VERSION) ==========
-def setup_webhook_background():
-    if not TOKEN or not WEBHOOK_URL:
-        print("⚠️ Webhook setup skipped")
-        return
-
-    def task():
-        time.sleep(5)
-        try:
-            bot = Bot(TOKEN)
-            print("🔄 Deleting old webhook...")
-            try:
-                bot.delete_webhook(drop_pending_updates=True)
-            except Exception as e:
-                print(f"⚠️ delete_webhook skipped: {e}")
-
-            time.sleep(1)
-            print(f"🔄 Setting new webhook to: {WEBHOOK_URL}")
-            try:
-                bot.set_webhook(url=WEBHOOK_URL)
-            except Exception as e:
-                print(f"⚠️ set_webhook skipped: {e}")
-
-            print("✅ Webhook setup done (sync-safe)")
-        except Exception as e:
-            print(f"❌ Webhook background error: {e}")
-
-    t = threading.Thread(target=task, daemon=True)
-    t.start()
-    print("🔄 Webhook setup started in background")
-
-# ========== API Endpoints ==========
 @app.route('/')
 def home():
+    """Root endpoint - health check"""
     return jsonify({
-        "service": "4UTODAY API",
         "status": "online",
-        "webhook": WEBHOOK_URL
+        "service": "4UTODAY Bot API",
+        "version": "1.0.0",
+        "webhook": config.WEBHOOK_URL,
+        "timestamp": datetime.now().isoformat(),
+        "endpoints": {
+            "health": "/health",
+            "webhook": config.WEBHOOK_PATH,
+            "posts": "/api/posts",
+            "stats": "/api/stats"
+        }
     })
 
-@app.route('/api/health')
-def health():
-    return jsonify({
-        "status": "healthy",
-        "time": datetime.utcnow().isoformat()
-    })
+@app.route('/health')
+def health_check():
+    """Health check endpoint"""
+    try:
+        # Database health check
+        with db.conn.cursor() as cur:
+            cur.execute("SELECT 1")
+        
+        return jsonify({
+            "status": "healthy",
+            "database": "connected",
+            "timestamp": datetime.now().isoformat()
+        }), 200
+    except Exception as e:
+        logger.error(f"Health check error: {e}")
+        return jsonify({
+            "status": "unhealthy",
+            "database": "disconnected",
+            "error": str(e)
+        }), 500
 
-@app.route('/api/posts')
+@app.route(config.WEBHOOK_PATH, methods=['POST'])
+async def telegram_webhook():
+    """Telegram webhook endpoint"""
+    try:
+        update_data = request.get_json()
+        logger.info(f"📩 Webhook received: {update_data}")
+        
+        # Process the update
+        await telegram_bot.process_update(update_data)
+        
+        # Log to database
+        db.add_log("INFO", "Webhook processed", "telegram_webhook")
+        
+        return jsonify({"status": "ok"}), 200
+    except Exception as e:
+        logger.error(f"❌ Webhook error: {e}")
+        db.add_log("ERROR", f"Webhook error: {e}", "telegram_webhook")
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+@app.route('/api/posts', methods=['GET'])
 def get_posts():
-    conn = get_db_connection()
-    if not conn:
-        return jsonify({"error": "DB connection failed"}), 500
-    with conn.cursor() as cur:
-        cur.execute("SELECT * FROM posts ORDER BY created_at DESC LIMIT 50")
-        posts = cur.fetchall()
-        for p in posts:
-            if p.get("created_at"):
-                p["created_at"] = p["created_at"].isoformat()
-    conn.close()
-    return jsonify(posts)
+    """Get all posts from database"""
+    try:
+        limit = request.args.get('limit', 100, type=int)
+        posts = db.get_all_posts(limit=limit)
+        
+        return jsonify({
+            "status": "success",
+            "count": len(posts),
+            "posts": posts
+        }), 200
+    except Exception as e:
+        logger.error(f"Get posts error: {e}")
+        return jsonify({"status": "error", "message": str(e)}), 500
 
-@app.route('/api/stats')
+@app.route('/api/posts/<post_id>', methods=['GET'])
+def get_post(post_id):
+    """Get a specific post"""
+    try:
+        post = db.get_post(post_id)
+        if post:
+            return jsonify({"status": "success", "post": post}), 200
+        else:
+            return jsonify({"status": "error", "message": "Post not found"}), 404
+    except Exception as e:
+        logger.error(f"Get post error: {e}")
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+@app.route('/api/stats', methods=['GET'])
 def get_stats():
-    conn = get_db_connection()
-    if not conn:
-        return jsonify({"error": "DB connection failed"}), 500
-    with conn.cursor() as cur:
-        cur.execute("SELECT COUNT(*) AS total FROM posts")
-        total = cur.fetchone()["total"]
-        cur.execute("""
-            SELECT tags, COUNT(*) AS count
-            FROM posts
-            GROUP BY tags
-            ORDER BY count DESC
-            LIMIT 5
-        """)
-        tags = cur.fetchall()
-    conn.close()
-    return jsonify({
-        "total_posts": total,
-        "top_tags": tags
-    })
+    """Get system statistics"""
+    try:
+        with db.conn.cursor() as cur:
+            cur.execute("SELECT COUNT(*) as total_posts FROM posts")
+            post_count = cur.fetchone()[0]
+            
+            cur.execute("SELECT COUNT(*) as total_users FROM users")
+            user_count = cur.fetchone()[0]
+            
+            cur.execute("""
+                SELECT 
+                    COUNT(CASE WHEN level = 'ERROR' THEN 1 END) as error_logs,
+                    COUNT(CASE WHEN level = 'INFO' THEN 1 END) as info_logs
+                FROM logs
+            """)
+            log_counts = cur.fetchone()
+        
+        return jsonify({
+            "status": "success",
+            "stats": {
+                "posts": post_count,
+                "users": user_count,
+                "logs": {
+                    "errors": log_counts[0],
+                    "info": log_counts[1]
+                },
+                "webhook": config.WEBHOOK_URL,
+                "server": config.RENDER_URL
+            }
+        }), 200
+    except Exception as e:
+        logger.error(f"Stats error: {e}")
+        return jsonify({"status": "error", "message": str(e)}), 500
 
-# ========== Startup ==========
+@app.before_first_request
 def startup():
-    print("🚀 Starting 4UTODAY Bot...")
-    init_database()
-    setup_webhook_background()
-    print("✅ Startup completed")
+    """Application startup sequence"""
+    logger.info("🚀 Starting 4UTODAY Bot...")
+    
+    # Configuration check
+    logger.info("🔧 Configuration Check:")
+    logger.info(f"   - TOKEN: {'✅ Set' if config.TOKEN else '❌ Missing'}")
+    logger.info(f"   - DATABASE_URL: {'✅ Set' if config.DATABASE_URL else '❌ Missing'}")
+    logger.info(f"   - RENDER_URL: {config.RENDER_URL}")
+    logger.info(f"   - WEBHOOK_URL: {config.WEBHOOK_URL}")
+    
+    # Database check
+    if db.conn:
+        logger.info("✅ Database connected")
+    else:
+        logger.error("❌ Database connection failed")
+    
+    # Setup webhook
+    logger.info("🔄 Setting up webhook...")
+    if setup_webhook_sync():
+        logger.info("✅ Webhook setup completed")
+    else:
+        logger.error("❌ Webhook setup failed")
+    
+    logger.info("✅ Startup completed")
 
-startup()
+@app.teardown_appcontext
+def shutdown(exception=None):
+    """Application shutdown cleanup"""
+    if exception:
+        logger.error(f"App shutdown with error: {exception}")
+    
+    # Close database connection
+    db.close()
+    logger.info("Application shutdown complete")
 
-if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 10000))
-    app.run(host="0.0.0.0", port=port)
+if __name__ == '__main__':
+    # Run startup sequence
+    startup()
+    
+    # Start Flask app
+    app.run(
+        host='0.0.0.0',
+        port=config.PORT,
+        debug=config.DEBUG,
+        use_reloader=False
+        )
