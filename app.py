@@ -1,13 +1,10 @@
-# app.py - 4UTODAY Telegram Bot with PostgreSQL
+# app.py - 4UTODAY Telegram Bot with PostgreSQL (Webhook Version)
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 import os
-import json
 import psycopg2
 from psycopg2.extras import RealDictCursor
-from telegram import Update
-from telegram.ext import Application, MessageHandler, filters, ContextTypes
-import threading
+from telegram import Update, Bot
 import asyncio
 from datetime import datetime
 
@@ -15,37 +12,31 @@ from datetime import datetime
 app = Flask(__name__)
 CORS(app)
 
-# ========== Database Functions ==========
+# Environment Variables
+TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN')
+# Render URL (automatically uses your app name)
+RENDER_URL = os.environ.get('RENDER_EXTERNAL_URL') or f"https://{os.environ.get('RENDER_EXTERNAL_HOSTNAME')}"
+WEBHOOK_PATH = f"/telegram-webhook/{TOKEN[:10]}" # Security identifier
+WEBHOOK_URL = f"{RENDER_URL}{WEBHOOK_PATH}"
+
+# ========== Database Functions (မူရင်းအတိုင်း) ==========
 def get_db_connection():
-    """Connect to PostgreSQL database with SSL requirement for Render"""
     try:
         db_url = os.environ.get('DATABASE_URL')
-        if not db_url:
-            print("❌ ERROR: DATABASE_URL environment variable is missing!")
-            return None
+        if not db_url: return None
         
-        # Render database require SSL mode
         if "sslmode" not in db_url:
-            if "?" in db_url:
-                db_url += "&sslmode=require"
-            else:
-                db_url += "?sslmode=require"
+            db_url += ("&" if "?" in db_url else "?") + "sslmode=require"
                 
-        conn = psycopg2.connect(
-            db_url,
-            cursor_factory=RealDictCursor
-        )
+        conn = psycopg2.connect(db_url, cursor_factory=RealDictCursor)
         return conn
     except Exception as e:
         print(f"❌ Database connection failed: {e}")
         return None
 
 def init_database():
-    """Initialize database table if not exists"""
     conn = get_db_connection()
-    if not conn:
-        return False
-    
+    if not conn: return False
     try:
         cur = conn.cursor()
         cur.execute("""
@@ -69,16 +60,22 @@ def init_database():
         print(f"❌ Database init error: {e}")
         return False
 
-# ========== Telegram Bot Handler ==========
-async def handle_channel_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Process new posts from Telegram channel"""
+# ========== Webhook Logic (Polling အစားထိုးခြင်း) ==========
+@app.route(WEBHOOK_PATH, methods=['POST'])
+async def telegram_webhook():
+    """Telegram ကနေ စာအသစ်ဝင်လာတိုင်း ဒီကို ရောက်မှာပါ"""
     try:
-        message = update.channel_post
-        if not message:
-            return
-        
-        print(f"📨 New post from channel: {message.chat.title}")
-        
+        update = Update.de_json(request.get_json(force=True), Bot(TOKEN))
+        if update.channel_post:
+            await process_post(update.channel_post)
+        return "OK", 200
+    except Exception as e:
+        print(f"❌ Webhook Error: {e}")
+        return "Error", 500
+
+async def process_post(message):
+    """မူရင်း handle_channel_post ထဲက logic များအားလုံး"""
+    try:
         title = ""
         description = ""
         
@@ -92,28 +89,25 @@ async def handle_channel_post(update: Update, context: ContextTypes.DEFAULT_TYPE
             title = "Media Post"
             description = "No text content"
         
+        # File URL logic
         file_url = ""
+        bot = Bot(TOKEN)
         if message.photo:
-            file_id = message.photo[-1].file_id
-            file = await context.bot.get_file(file_id)
+            file = await bot.get_file(message.photo[-1].file_id)
             file_url = file.file_path
         elif message.video:
-            file = await context.bot.get_file(message.video.file_id)
+            file = await bot.get_file(message.video.file_id)
             file_url = file.file_path
         elif message.document:
-            file = await context.bot.get_file(message.document.file_id)
+            file = await bot.get_file(message.document.file_id)
             file_url = file.file_path
         
-        tags = []
-        text_source = message.caption or message.text or ""
-        for word in text_source.split():
-            if word.startswith("#"):
-                tags.append(word)
-        
+        # Tags logic
+        tags = [word for word in (description or "").split() if word.startswith("#")]
         tags_str = ", ".join(tags) if tags else "general"
         channel_name = message.chat.username or message.chat.title
         
-        # Save to PostgreSQL using RETURNING for compatibility
+        # Database Insert (RETURNING id fix အပါအဝင်)
         conn = get_db_connection()
         if conn:
             cur = conn.cursor()
@@ -123,114 +117,65 @@ async def handle_channel_post(update: Update, context: ContextTypes.DEFAULT_TYPE
                 VALUES (%s, %s, %s, %s, %s, %s)
                 RETURNING id
             """, (message.message_id, title, description, file_url, tags_str, channel_name))
-            
-            new_id = cur.fetchone()['id']
             conn.commit()
-            
-            cur.execute("SELECT * FROM posts WHERE id = %s", (new_id,))
-            new_post = cur.fetchone()
-            
             cur.close()
             conn.close()
-            
-            print(f"✅ Post saved to database: {title[:50]}...")
-            return new_post
-        
+            print(f"✅ Webhook Saved: {title[:50]}...")
     except Exception as e:
-        print(f"❌ Error processing post: {e}")
-        return None
+        print(f"❌ Post processing error: {e}")
 
-# ========== Bot Manager ==========
-class BotManager:
-    def __init__(self):
-        self.application = None
-        self.is_running = False
+# Webhook Setup on Startup
+@app.before_first_request
+def setup():
+    init_database()
+    async def set_webhook():
+        bot = Bot(TOKEN)
+        await bot.set_webhook(url=WEBHOOK_URL)
+        print(f"🌐 Webhook linked to: {WEBHOOK_URL}")
     
-    def start_bot(self):
-        """Start Telegram bot in background thread"""
-        if self.is_running:
-            return
-        
-        token = os.environ.get('TELEGRAM_BOT_TOKEN')
-        if not token:
-            print("❌ TELEGRAM_BOT_TOKEN not set")
-            return
-        
-        try:
-            if not init_database():
-                print("⚠️ Database initialization failed")
-            
-            self.application = Application.builder().token(token).build()
-            self.application.add_handler(
-                MessageHandler(filters.ChatType.CHANNEL, handle_channel_post)
-            )
-            
-            self.is_running = True
-            bot_thread = threading.Thread(target=self.run_bot, daemon=True)
-            bot_thread.start()
-            
-            print("🤖 4UTODAY Bot started successfully")
-        except Exception as e:
-            print(f"❌ Failed to start bot: {e}")
-            self.is_running = False
+    try:
+        loop = asyncio.get_event_loop()
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
     
-    def run_bot(self):
-        try:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            self.application.run_polling(close_loop=False)
-        except Exception as e:
-            print(f"❌ Bot polling error: {e}")
-            self.is_running = False
+    if loop.is_running():
+        loop.create_task(set_webhook())
+    else:
+        loop.run_until_complete(set_webhook())
 
-# Global instance to ensure it starts regardless of how Flask is called
-bot_manager = BotManager()
-bot_manager.start_bot()
-
-# ========== API Routes for Frontend ==========
+# ========== API Routes (မူရင်းအတိုင်း အားလုံးပါတယ်) ==========
 @app.route('/')
 def home():
     return jsonify({
-        "service": "4UTODAY Telegram Bot API",
-        "status": "running",
-        "bot_status": "active" if bot_manager.is_running else "inactive"
+        "service": "4UTODAY API",
+        "status": "active",
+        "mode": "webhook"
     })
 
 @app.route('/api/health')
-def health_check():
+def health():
     conn = get_db_connection()
     db_status = "connected" if conn else "disconnected"
     if conn: conn.close()
-    return jsonify({
-        "status": "healthy",
-        "database": db_status,
-        "timestamp": datetime.now().isoformat()
-    })
+    return jsonify({"status": "healthy", "database": db_status, "time": datetime.now().isoformat()})
 
 @app.route('/api/posts')
 def get_posts():
     try:
         conn = get_db_connection()
-        if not conn: return jsonify({"error": "Database unavailable"}), 500
-        
+        if not conn: return jsonify({"error": "DB offline"}), 500
         cur = conn.cursor()
         tag_filter = request.args.get('tag', 'all')
         limit = int(request.args.get('limit', 50))
         
         if tag_filter != 'all':
-            query = "SELECT * FROM posts WHERE tags LIKE %s ORDER BY created_at DESC LIMIT %s"
-            params = [f'%{tag_filter}%', limit]
+            cur.execute("SELECT * FROM posts WHERE tags LIKE %s ORDER BY created_at DESC LIMIT %s", (f'%{tag_filter}%', limit))
         else:
-            query = "SELECT * FROM posts ORDER BY created_at DESC LIMIT %s"
-            params = [limit]
+            cur.execute("SELECT * FROM posts ORDER BY created_at DESC LIMIT %s", (limit,))
         
-        cur.execute(query, params)
         posts = cur.fetchall()
-        
-        for post in posts:
-            if post['created_at']:
-                post['created_at'] = post['created_at'].isoformat()
-        
+        for p in posts: p['created_at'] = p['created_at'].isoformat()
         cur.close()
         conn.close()
         return jsonify({"count": len(posts), "posts": posts})
@@ -241,22 +186,14 @@ def get_posts():
 def get_stats():
     try:
         conn = get_db_connection()
-        if not conn: return jsonify({"error": "Database unavailable"}), 500
-        
         cur = conn.cursor()
         cur.execute("SELECT COUNT(*) as total FROM posts")
         total = cur.fetchone()['total']
-        
         cur.execute("SELECT tags, COUNT(*) as count FROM posts GROUP BY tags ORDER BY count DESC LIMIT 10")
         tags_stats = cur.fetchall()
-        
         cur.execute("SELECT DATE(created_at) as date, COUNT(*) as count FROM posts GROUP BY DATE(created_at) ORDER BY date DESC LIMIT 7")
         activity = cur.fetchall()
-        
-        # Convert date to string
-        for act in activity:
-            act['date'] = str(act['date'])
-            
+        for a in activity: a['date'] = str(a['date'])
         cur.close()
         conn.close()
         return jsonify({"total_posts": total, "top_tags": tags_stats, "recent_activity": activity})
