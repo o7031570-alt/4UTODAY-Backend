@@ -1,0 +1,132 @@
+<!-- templates/index.html -->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>4UTODAY - Telegram Content Hub</title>
+    
+    <!-- Font Awesome -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    
+    <!-- Google Fonts -->
+    <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@300;400;500;600;700&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+    
+    <!-- Custom CSS -->
+    <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+    <!-- Header with Logo -->
+    <header class="main-header">
+        <div class="header-container">
+            <a href="/" class="logo-brand">
+                <div class="logo-icon">4U</div>
+                <div class="brand-text">
+                    <h1>4UTODAY</h1>
+                    <p>Telegram Content Hub</p>
+                </div>
+            </a>
+            
+            <div class="stats-bar">
+                <div class="stat-item">
+                    <span class="stat-number" id="totalPosts">0</span>
+                    <span class="stat-label">Total Posts</span>
+                </div>
+                <div class="stat-item">
+                    <span class="stat-number" id="activeTags">0</span>
+                    <span class="stat-label">Tags</span>
+                </div>
+                <div class="stat-item">
+                    <span class="stat-number" id="todayPosts">0</span>
+                    <span class="stat-label">Today</span>
+                </div>
+            </div>
+        </div>
+    </header>
+
+    <!-- Main Content -->
+    <main class="container">
+        <!-- Dashboard -->
+        <div class="dashboard">
+            <div class="dashboard-card">
+                <div class="card-header">
+                    <h2 class="card-title">
+                        <div class="card-icon">
+                            <i class="fas fa-broadcast-tower"></i>
+                        </div>
+                        Live Updates
+                    </h2>
+                    <span class="status-indicator active"></span>
+                </div>
+                <p>Posts from your Telegram channel appear here automatically. System updates every <strong>30 seconds</strong>.</p>
+                <div class="update-info">
+                    <span>Last update: <span id="lastUpdate">Just now</span></span>
+                </div>
+            </div>
+            
+            <div class="dashboard-card">
+                <div class="card-header">
+                    <h2 class="card-title">
+                        <div class="card-icon">
+                            <i class="fas fa-chart-pie"></i>
+                        </div>
+                        Content Stats
+                    </h2>
+                </div>
+                <div id="tagCloud">
+                    <p>Loading tag statistics...</p>
+                </div>
+            </div>
+        </div>
+
+        <!-- Controls -->
+        <div class="controls">
+            <div class="tag-filter">
+                <label for="tagSelect"><i class="fas fa-filter"></i> Filter by Tag:</label>
+                <select id="tagSelect">
+                    <option value="all">All Posts</option>
+                    <!-- Tags will be populated by JavaScript -->
+                </select>
+            </div>
+            
+            <div class="search-box">
+                <input type="text" id="searchInput" placeholder="Search posts...">
+            </div>
+            
+            <button class="refresh-btn" id="refreshBtn">
+                <i class="fas fa-sync-alt"></i> Refresh Now
+            </button>
+        </div>
+
+        <!-- Posts Grid -->
+        <div id="loading">
+            <i class="fas fa-spinner fa-spin"></i> Loading posts from 4UTODAY channel...
+        </div>
+        
+        <div class="posts-grid" id="postsContainer">
+            <!-- Posts will be inserted here by JavaScript -->
+        </div>
+        
+        <div id="noPosts" class="empty-state" style="display: none;">
+            <div class="empty-icon">
+                <i class="far fa-newspaper"></i>
+            </div>
+            <h3>No posts to display</h3>
+            <p>Posts from your Telegram channel will appear here automatically.</p>
+        </div>
+    </main>
+
+    <!-- Footer -->
+    <footer class="main-footer">
+        <p>Powered by 4UTODAY Telegram Bot • Content updates every <span id="countdown">30</span> seconds</p>
+        <div class="update-info">
+            <span><i class="fas fa-database"></i> PostgreSQL Backend</span>
+            <span><i class="fas fa-bolt"></i> Real-time Updates</span>
+            <span><i class="fas fa-mobile-alt"></i> Fully Responsive</span>
+        </div>
+    </footer>
+
+    <!-- JavaScript -->
+    <script src="/static/js/app.js"></script>
+</body>
+  </html>
